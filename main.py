@@ -1,69 +1,154 @@
-# review_flow.py -- Mini App + initData + Payments
-from aiogram import Bot, F, Router
-from aiogram.types import LabeledPrice, Message, PreCheckoutQuery
+# ═══════════════════════════════════════════════════════════════════════
+# Outer va Inner middleware zanjiri: ishga tushirish tartibini isbotlash
+# ═══════════════════════════════════════════════════════════════════════
+from typing import Any, Awaitable, Callable, Dict
 
-router = Router()
-
-# Security modulidan xavfsizlik funksiyasini import qilish
-from security import verify_init_data
-
-
-def get_real_price(product_id: str) -> int:
-    """Serverdagi haqiqiy narxni qaytaradi (tiyinda/tijorat birligida).
-    Masalan: 50,000 UZS = 5000000 (agar provayder tiyinda qabul qilsa)
-    """
-    prices = {"prod_1": 5000000, "prod_2": 10000000}
-    return prices.get(product_id, 0)
+from aiogram import BaseMiddleware, Router
+from aiogram.types import Message, TelegramObject
 
 
-def mark_paid_in_db(payload: str, charge_id: str) -> None:
-    """Ma'lumotlar bazasida buyurtmani to'langan deb belgilash."""
-    # DB logika bu yerga yoziladi
-    pass
+class OuterLoggingMiddleware(BaseMiddleware):
+    # Outer #1 — HAR bir update uchun ishlaydi.
+
+    async def __call__(self, handler, event: TelegramObject, data: Dict[str, Any]) -> Any:
+        print("-> OUTER logging: kirish")
+        result = await handler(event, data)
+        print("<- OUTER logging: chiqish")
+        return result
 
 
-async def handle_mini_app_order(
-    bot: Bot, chat_id: int, init_data: str, product_id: str
-) -> None:
-    # 1. Mini App'dan kelgan Telegram xavfsizlik ma'lumotlarini tekshirish
-    user = verify_init_data(init_data, bot_token=bot.token)
-    if user is None:
-        raise PermissionError("initData yaroqsiz -- so'rov rad etildi")
+class OuterAuthMiddleware(BaseMiddleware):
+    # Outer #2 — HAR bir update uchun ishlaydi, logging ICHIDA.
 
-    # 2. Narxni Mijozdan (Frontend) emas, qat'iy Server bazasidan olish
-    price = get_real_price(product_id)
-    if price <= 0:
-        raise ValueError("Mahsulot narxi noto'g'ri")
-
-    # 3. aiogram 3.x uchun LabeledPrice obyektini yaratish
-    prices = [LabeledPrice(label="Narx", amount=price)]
-
-    # 4. Invoys yuborish
-    await bot.send_invoice(
-        chat_id=chat_id,
-        title="Buyurtma",
-        description=f"Mahsulot #{product_id}",
-        payload=f"order:{user['id']}:{product_id}",
-        provider_token="PROVIDER_TOKEN",  # BotFather'dan olingan token
-        currency="UZS",
-        prices=prices,
-    )
+    async def __call__(self, handler, event: TelegramObject, data: Dict[str, Any]) -> Any:
+        print("-> OUTER auth: tekshirilmoqda")
+        result = await handler(event, data)
+        print("<- OUTER auth: tugadi")
+        return result
 
 
-@router.pre_checkout_query()
-async def confirm_pre_checkout(pre_checkout_query: PreCheckoutQuery) -> None:
-    # Telegram to'lovni amalga oshirishdan oldin 10 soniya ichida tasdiq so'raydi
-    # Bu yerda ombor omborida mahsulot bor-yo'qligini qayta tekshirish mumkin
-    await pre_checkout_query.answer(ok=True)
+class InnerLoadCartMiddleware(BaseMiddleware):
+    # Inner #1 — FAQAT filtr mos kelgan handler uchun ishlaydi.
+
+    async def __call__(self, handler, event: Message, data: Dict[str, Any]) -> Any:
+        print("-> INNER savat yuklash")
+        data["cart"] = {"items": []}  # odatda bazadan yuklanadi
+        result = await handler(event, data)
+        print("<- INNER savat: tozalash")
+        return result
 
 
-@router.message(F.successful_payment)
-async def mark_order_paid(message: Message) -> None:
-    # To'lov muvaffaqiyatli amalga oshirilgach, DB'ga yozish va foydalanuvchiga xabar berish
-    payment_info = message.successful_payment
-    payload = payment_info.invoice_payload
-    charge_id = payment_info.telegram_payment_charge_id
+class InnerTimingMiddleware(BaseMiddleware):
+    # Inner #2 — handlerga eng yaqin qatlam.
 
-    mark_paid_in_db(payload, charge_id=charge_id)
+    async def __call__(self, handler, event: Message, data: Dict[str, Any]) -> Any:
+        print("-> INNER timing: boshlandi")
+        result = await handler(event, data)
+        print("<- INNER timing: tugadi")
+        return result
 
-    await message.answer("To'lovingiz muvaffaqiyatli qabul qilindi! Rahmat.")
+
+def register_middlewares(router: Router) -> None:
+    # Ro'yxatdan o'tkazish tartibi = ichma-ich joylashish tartibi
+    router.update.outer_middleware(OuterLoggingMiddleware())   # eng tashqi
+    router.update.outer_middleware(OuterAuthMiddleware())
+    router.message.middleware(InnerLoadCartMiddleware())
+    router.message.middleware(InnerTimingMiddleware())          # handlerga eng yaqin
+
+
+# Kutilgan konsol chiqishi mos handler topilganda:
+# -> OUTER logging: kirish
+# -> OUTER auth: tekshirilmoqda
+# -> INNER savat yuklash
+# -> INNER timing: boshlandi
+#   (handler ishlaydi)
+# <- INNER timing: tugadi
+# <- INNER savat: tozalash
+# <- OUTER auth: tugadi
+# <- OUTER logging: chiqish
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Nested router'lar: admin_router va user_router asosiy dispetcherga ulanadi
+# ═══════════════════════════════════════════════════════════════════════
+from aiogram import Dispatcher
+from aiogram.filters import Command
+from aiogram.types import Message
+
+admin_router = Router(name="admin")
+user_router = Router(name="user")
+
+
+@admin_router.message(Command("stats"))
+async def cmd_stats(message: Message) -> None:
+    await message.answer("Statistika: faol foydalanuvchilar soni ...")
+
+
+@user_router.message(Command("help"))
+async def cmd_help(message: Message) -> None:
+    await message.answer("Yordam: /start, /help buyruqlari mavjud.")
+
+
+def build_dispatcher() -> Dispatcher:
+    dp = Dispatcher()
+    # Outer middleware'lar ASOSIY dispetcherga qo'yiladi — shu tufayli
+    # admin_router HAM, user_router HAM ular orqali o'tadi, chunki
+    # include_router qilingan router'lar ota dispetcherning outer
+    # middleware'laridan chetlanib qololmaydi.
+    dp.update.outer_middleware(OuterLoggingMiddleware())
+    dp.update.outer_middleware(OuterAuthMiddleware())
+
+    user_router.message.middleware(InnerLoadCartMiddleware())
+    user_router.message.middleware(InnerTimingMiddleware())
+
+    dp.include_router(admin_router)
+    dp.include_router(user_router)
+    return dp
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# pytest: ishga tushirish tartibini ro'yxat orqali isbotlash
+# ═══════════════════════════════════════════════════════════════════════
+import pytest
+
+
+class RecordingMiddleware(BaseMiddleware):
+    # Sinov uchun: har bir bosqichni umumiy ro'yxatga yozib boradi.
+
+    def __init__(self, name: str, trace: list):
+        self.name = name
+        self.trace = trace
+
+    async def __call__(self, handler, event, data):
+        self.trace.append(f"-> {self.name}")
+        result = await handler(event, data)
+        self.trace.append(f"<- {self.name}")
+        return result
+
+
+@pytest.mark.asyncio
+async def test_middleware_order_is_onion_shaped():
+    trace: list[str] = []
+    router = Router(name="test")
+    router.update.outer_middleware(RecordingMiddleware("OUTER-1", trace))
+    router.update.outer_middleware(RecordingMiddleware("OUTER-2", trace))
+    router.message.middleware(RecordingMiddleware("INNER-1", trace))
+    router.message.middleware(RecordingMiddleware("INNER-2", trace))
+
+    @router.message(Command("ping"))
+    async def handler(message: Message) -> None:
+        trace.append("HANDLER")
+
+    dp = Dispatcher()
+    dp.include_router(router)
+
+    # _build_fake_command_update — 6-darsda ("Botlarni testlash") yozilgan
+    # yordamchi funksiya: minimal Update/Message obyektini qo'lda quradi.
+    fake_update = _build_fake_command_update("/ping")
+    await dp.feed_update(bot=None, update=fake_update)
+
+    assert trace == [
+        "-> OUTER-1", "-> OUTER-2", "-> INNER-1", "-> INNER-2",
+        "HANDLER",
+        "<- INNER-2", "<- INNER-1", "<- OUTER-2", "<- OUTER-1",
+    ]
