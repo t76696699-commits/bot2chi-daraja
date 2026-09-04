@@ -3,43 +3,24 @@ import os
 
 from dotenv import load_dotenv
 from telethon import TelegramClient
-from telethon.errors import (
-    PhoneCodeInvalidError,
-    PhoneNumberInvalidError,
-    SessionPasswordNeededError,
-    FloodWaitError,
-)
+from telethon.sessions import StringSession
+from telethon.tl.functions.account import GetAuthorizationsRequest
 
 load_dotenv()
-
-API_ID = int(os.getenv("API_ID", 0))
-API_HASH = os.getenv("API_HASH")
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-
-client = TelegramClient("namuna_session", API_ID, API_HASH)
+API_ID = int(os.environ["API_ID"])
+API_HASH = os.environ["API_HASH"]
+SESSION_STRING = os.environ["TELETHON_SESSION_STRING"]
 
 
-async def main() -> None:
-    await client.connect()
-    if not await client.is_user_authorized():
-        phone = os.environ.get("PHONE") or input("Telefon: ")
-        try:
-            sent = await client.send_code_request(phone)
-            code = input("Kod: ")
-            await client.sign_in(phone, code, phone_code_hash=sent.phone_code_hash)
-        except SessionPasswordNeededError:
-            await client.sign_in(password=input("2FA parol: "))
-        except (PhoneNumberInvalidError, PhoneCodeInvalidError) as e:
-            print(f"Login xatosi: {e}")
-            return
-        except FloodWaitError as e:
-            print(f"{e.seconds} soniya kutish kerak.")
-            return
-
-    me = await client.get_me()
-    print(f"Salom, {me.first_name}! (id={me.id})")
-    await client.disconnect()
+async def audit() -> None:
+    async with TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH) as client:
+        result = await client(GetAuthorizationsRequest())
+        print(f"Jami faol seanslar: {len(result.authorizations)}\n")
+        for auth in result.authorizations:
+            marker = "JORIY" if auth.current else "boshqa qurilma"
+            print(f"[{marker}] {auth.device_model} ({auth.platform}) -- {auth.country}")
+            print(f"        so'nggi faollik: {auth.date_active}, hash={auth.hash}")
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(audit())
