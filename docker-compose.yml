@@ -1,0 +1,15 @@
+version: '3.8'
+
+services:
+  telegram_bot:
+    build: .
+    container_name: pyrogram_bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - bot_session_data:/app
+    stop_signal: SIGTERM
+
+volumes:
+  bot_session_data:
